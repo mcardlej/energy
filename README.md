@@ -46,7 +46,7 @@ configured a single token.
 | `public/mock/state.json` | Sample payload used in demo mode; also the schema reference. |
 | `public/config.js` | **Local-development fallback only.** In production the Worker generates `/config.js` from the Cloudflare environment, and `.assetsignore` keeps this file from being uploaded. |
 | `public/.assetsignore` | Files excluded from Cloudflare's static asset store. |
-| `wrangler.toml` | Cloudflare deployment + every non-secret setting (`[vars]`). |
+| `wrangler.toml` | How to deploy — name, entry point, assets. Deliberately holds no settings. |
 | `.dev.vars.example` | Template for local secrets; copy to `.dev.vars` (git-ignored). |
 | `worker/index.js` | Worker entry point: routing, caching, security headers. |
 | `worker/env.js` | Reads settings and secrets off the Cloudflare `env` object. |
@@ -87,7 +87,7 @@ npx wrangler dev
 ```
 
 `wrangler dev` serves the static files, generates `/config.js` from
-`wrangler.toml` + `.dev.vars`, and runs the real `/api/state` against your
+`.dev.vars`, and runs the real `/api/state` against your
 upstreams. With no secrets in `.dev.vars` it stays in demo mode, so it is safe
 to run before you have any tokens.
 
@@ -125,8 +125,8 @@ independent reasons, any one of which is fatal:
 
 The Worker is that backend. It is also where every setting lives: it generates
 `/config.js` per request from the Cloudflare environment, so changing the poll
-interval or the timezone is a `wrangler deploy` (or a dashboard edit), not a
-code change.
+interval or the timezone is a dashboard edit that takes effect on the next
+request — not a code change, and not a redeploy.
 
 **One thing a Worker cannot do:** open a Modbus TCP socket, or reach anything on
 your home LAN. Workers speak HTTP to the public internet only. That is why the
@@ -365,7 +365,7 @@ Notes from the register map that bite people:
   a harmless mistake: gate the write behind an allowlist of exactly the four
   mode values, log every write, and test against the mySigen app before wiring
   the button up. That allowlist is in `worker/homeassistant.js`, and the whole
-  path is off until you set `ALLOW_WRITES = "true"` in `wrangler.toml`. Until
+  path is off until you set `ALLOW_WRITES` to `true` in the dashboard. Until
   then the Worker reports `readOnly: true` and the buttons render disabled.
 
 The community Home Assistant integration
@@ -462,17 +462,24 @@ somewhere, and no credential in this repository.
 
 ### What goes where
 
-Three tiers, and the difference between them is the whole security model:
+Open *Workers & Pages → home-energy → Settings → Variables and Secrets*. Every
+setting and every credential is added there, and each entry is one of two
+types:
 
-| Tier | Stored in | Visible to | Use for |
-| --- | --- | --- | --- |
-| **Secrets** | Cloudflare Secrets (`wrangler secret put`) | the Worker only — write-only once set, never shown again, not in `git`, not in the dashboard | tokens, passwords, tunnel hostnames |
-| **Vars** | `[vars]` in `wrangler.toml` | anyone with the repo; most are echoed in `/config.js` | poll interval, timezone, entity ids, feature flags |
-| **Assets** | everything under `public/` | the public internet | the page itself |
+| Type | Visible afterwards | Use for |
+| --- | --- | --- |
+| **Text** | yes — readable and editable in the dashboard | poll interval, timezone, entity ids, feature flags |
+| **Secret** | no — write-only once saved, never shown again | tokens, passwords, tunnel hostnames |
 
-**Secrets** — set each one with `wrangler secret put NAME` (it prompts, so the
-value never lands in your shell history) or in the dashboard under *Workers &
-Pages → home-energy → Settings → Variables and Secrets*:
+That is the whole configuration model. Nothing lives in `wrangler.toml`, so
+there is no second place to check and no way for a committed value to
+contradict a deployed one. `wrangler.toml` describes only *how* to deploy.
+
+**Everything is optional.** Every setting has a default in `worker/env.js`, so
+a Worker with an empty Variables screen deploys and runs — it just serves the
+bundled sample data. Add only the entries you actually want to change.
+
+**Secrets** — the credentials, added as type *Secret*:
 
 | Secret | Required | What it is |
 | --- | --- | --- |
@@ -489,10 +496,17 @@ secrets only → real prices, `—` for the power figures. Add the Home Assistan
 secrets → the whole dashboard goes live. You never edit `demo` by hand; it is
 derived.
 
-**Vars** are in `[vars]` in `wrangler.toml` — the full list is in
-[Configuration reference](#configuration-reference). They are deliberately *not*
-secret, because they are the things you want to see in a diff: an entity id
-changing is a code review, an API token changing is not.
+**Text variables** are the tunables — the full list is in
+[Configuration reference](#configuration-reference). In practice most people
+set two or three (`TIME_ZONE`, `ALLOW_WRITES`, maybe a sign flip) and leave
+the rest alone.
+
+> **Why `keep_vars = true` is in `wrangler.toml`.** By default `wrangler
+> deploy` deletes every variable on the Worker and replaces them with the set
+> defined in the config file — so with no `[vars]` block, a deploy would wipe
+> everything you typed into the dashboard. `keep_vars = true` turns that off.
+> Secrets are never touched by a deploy either way. Do not remove that line
+> unless you move your settings back into `wrangler.toml`.
 
 ### Reaching Home Assistant from a Worker
 
@@ -551,23 +565,32 @@ From a clean checkout:
 npm install
 npx wrangler login                      # opens a browser, once per machine
 
-# 1. Deploy as-is. No secrets yet → sample data, and you can confirm the page
-#    and routing work before wiring anything real up.
+# Deploy with nothing configured. Sample data, but it confirms the page and
+# routing work before you wire anything real up.
 npx wrangler deploy
 # → https://home-energy.<your-subdomain>.workers.dev
-
-# 2. Prices. Both prompt for the value; nothing is echoed or logged.
-npx wrangler secret put AMBER_API_TOKEN
-npx wrangler secret put AMBER_SITE_ID
-
-# 3. Telemetry, once the tunnel from the previous section is up.
-npx wrangler secret put HA_BASE_URL
-npx wrangler secret put HA_TOKEN
-npx wrangler secret put HA_ACCESS_CLIENT_ID       # optional
-npx wrangler secret put HA_ACCESS_CLIENT_SECRET   # optional
 ```
 
-Secrets take effect on the next request — no redeploy needed. Check:
+Then add the credentials in the dashboard — *Workers & Pages → home-energy →
+Settings → Variables and Secrets → Add*, type **Secret**:
+
+- `AMBER_API_TOKEN`, `AMBER_SITE_ID` → prices go live.
+- `HA_BASE_URL`, `HA_TOKEN` → the rest of the dashboard goes live, once the
+  tunnel from the previous section is up.
+- `HA_ACCESS_CLIENT_ID`, `HA_ACCESS_CLIENT_SECRET` → only if that hostname is
+  behind an Access policy.
+
+Same thing from the CLI if you prefer, one prompt each so the value never
+lands in your shell history:
+
+```bash
+npx wrangler secret put AMBER_API_TOKEN
+npx wrangler secret put AMBER_SITE_ID
+npx wrangler secret put HA_BASE_URL
+npx wrangler secret put HA_TOKEN
+```
+
+Either way they take effect on the next request — no redeploy needed. Check:
 
 ```bash
 curl -s https://home-energy.<subdomain>.workers.dev/config.js
@@ -579,10 +602,9 @@ npx wrangler tail                       # live logs, including upstream failures
 renders around the hole rather than blanking.
 
 **Enable writes last.** Verify the mode entity from Home Assistant's Developer
-Tools first, then set `ALLOW_WRITES = "true"` in `wrangler.toml` and
-`npx wrangler deploy`. Until then `POST /api/battery/mode` returns 403 and the
-Worker reports `readOnly: true`, so the buttons render disabled rather than
-failing on click.
+Tools first, then add a **Text** variable `ALLOW_WRITES` = `true`. Until then
+`POST /api/battery/mode` returns 403 and the Worker reports `readOnly: true`,
+so the buttons render disabled rather than failing on click.
 
 **A custom domain** is optional. Add a route in `wrangler.toml` for a zone you
 have on Cloudflare:
@@ -610,13 +632,18 @@ revoke it at the source (Amber's developer page, Home Assistant's token list)
 
 ## Configuration reference
 
-Every value below is read from the Cloudflare environment by `worker/env.js`.
-Set the vars in `[vars]` in `wrangler.toml` (or in the dashboard) and deploy;
-set the secrets with `wrangler secret put`.
+Every value below is read from the Cloudflare environment by `worker/env.js`,
+and **every one is optional** — the default in brackets applies when the
+variable is absent. Add them as **Text** variables under *Settings → Variables
+and Secrets*; changes take effect on the next request, with no redeploy.
+
+Locally, put the same names in `.dev.vars` (git-ignored) and `wrangler dev`
+picks them up.
 
 ### Sent to the browser in `/config.js`
 
-Public by definition — these are downloaded by every visitor.
+Public by definition — these are downloaded by every visitor, so they must be
+added as **Text**, never as Secret.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
@@ -638,12 +665,13 @@ nothing is configured.
 
 ### Worker behaviour
 
-Not sent to the browser.
+Read by the Worker only, never sent to the browser. You are unlikely to need
+any of these beyond `ALLOW_WRITES` and possibly a sign flip.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `DEMO` | `true` | Serve `mock/state.json` when no upstream secret is set. |
-| `ALLOW_WRITES` | `false` | Master switch for `POST /api/battery/mode`. Requires the Home Assistant secrets too. |
+| `ALLOW_WRITES` | `false` | Master switch for `POST /api/battery/mode`. Requires the Home Assistant secrets too. **The one Text variable most people need to set.** |
 | `UPSTREAM_TIMEOUT_MS` | `8000` | Worker-side timeout per upstream call. |
 | `SNAPSHOT_CACHE_MS` | `15000` | How long an assembled snapshot is reused. |
 | `AMBER_CACHE_MS` | `90000` | Amber cache. Prices move every 5 minutes and the limit is ~50 requests / 5 min, so do not lower this much. |
@@ -700,17 +728,20 @@ CSS already falls back to system fonts, so a blocked font request degrades
 rather than breaks.
 
 For a wall tablet, also consider: `display: standalone` via a web manifest,
-kiosk mode in the browser, and the fact that `REFRESH_SECONDS = "30"` on a 24/7
+kiosk mode in the browser, and the fact that `REFRESH_SECONDS` of 30 on a 24/7
 screen is ~2,900 requests a day against the Worker's cache, not upstream. That
 is comfortably inside the Workers free tier.
 
 ## Security checklist
 
-- [ ] Every credential set with `wrangler secret put` — nothing in
-      `wrangler.toml`, `config.js`, `app.js`, or any file under the web root.
-      `git grep -iE 'psk_|Bearer |token *[:=]'` should come back clean.
+- [ ] Every credential added as a Cloudflare **Secret**, never as a Text
+      variable and never in `wrangler.toml`, `config.js`, `app.js` or any file
+      under the web root. `git grep -iE 'psk_|Bearer |token *[:=]'` should come
+      back clean, and `npx wrangler secret list` should name every credential.
 - [ ] `.dev.vars` git-ignored and never committed. `.dev.vars.example` holds
       placeholders only.
+- [ ] `keep_vars = true` still in `wrangler.toml`, or a deploy will wipe every
+      setting you added in the dashboard.
 - [ ] `config.js` listed in `public/.assetsignore`, so the committed fallback
       cannot shadow the Worker-generated one in production.
 - [ ] Cloudflare Access (or equivalent) in front of the Worker — a home
@@ -740,7 +771,8 @@ is comfortably inside the Workers free tier.
 | Values render but "Data is stale" | The backend is answering from a cache while an upstream is dead. Check `errors[]` in the raw payload. |
 | Grid arrows point the wrong way | Sign convention flipped in your adapter: `grid` positive = importing, `battery` positive = charging. |
 | Feed-in price shown as a cost (or vice versa) | Amber's `feedIn` channel sign — see the Amber section. |
-| Mode buttons disabled | Demo mode, `ALLOW_WRITES` still `false`, `READ_ONLY = "true"`, or an unmapped mode entity. |
+| Mode buttons disabled | Demo mode, `ALLOW_WRITES` not set to `true`, `READ_ONLY` set to `true`, or an unmapped mode entity. |
+| A setting you added in the dashboard reverted after deploying | `keep_vars = true` is missing from `wrangler.toml` — Wrangler clears all vars on deploy without it. Secrets are unaffected. |
 | Prices stop updating, backend log shows 429 | Amber rate limit. Increase the upstream cache; the page's poll interval is not the problem. |
 | Everything works, fonts look wrong | Google Fonts unreachable. Harmless — system fallbacks. Self-host to fix permanently. |
 
