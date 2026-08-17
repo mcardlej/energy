@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-12T02:41:00Z",
+  "price": {
+    "descriptor": "low",
+    "buy": 9.4,
+    "feedIn": 3.8,
+    "renewables": 64,
+    "spike": false,
+    "forecast": {
+      "start": "2026-07-12T03:00:00Z",
+      "end": "2026-07-12T05:00:00Z",
+      "perKwh": 4.1
+    },
+    "updatedAt": "2026-07-12T02:35:00Z",
+    "source": "amber"
+  },
+  "site": {
+    "solar": 4.2,
+    "load": 1.1,
+    "battery": 2.6,
+    "grid": -0.5,
+    "car": 0,
+    "updatedAt": "2026-07-12T02:39:00Z",
+    "source": "sigen"
+  },
+  "battery": {
+    "soc": 76,
+    "energy": 12.2,
+    "capacity": 16,
+    "power": 2.6,
+    "mode": "time_of_use",
+    "modes": [
+      { "id": "sigen_ai", "label": "Sigen AI" },
+      { "id": "max_self_powered", "label": "Max self powered" },
+      { "id": "time_of_use", "label": "Time of use" },
+      { "id": "fully_fed_to_grid", "label": "Fully fed to grid" }
+    ],
+    "secondsToFull": 5100,
+    "secondsToEmpty": null,
+    "updatedAt": "2026-07-12T02:39:00Z",
+    "source": "sigen"
+  },
+  "vehicle": {
+    "name": "Polestar 2",
+    "soc": 68,
+    "rangeKm": 340,
+    "pluggedIn": true,
+    "charging": false,
+    "power": 0,
+    "readOnly": true,
+    "updatedAt": "2026-07-12T02:19:00Z",
+    "source": "polestar"
+  },
+  "today": {
+    "solar": 28.4,
+    "exported": 9.1,
+    "imported": 2.3,
+    "consumed": 14.7
+  }
+}
