@@ -1,0 +1,7 @@
+# Excluded from Cloudflare's static asset store.
+#
+# config.js is generated per-request by the Worker from the Cloudflare
+# environment (worker/config.js). The file here is a local-development
+# fallback only — uploading it would shadow the Worker route, and the
+# dashboard would run on committed settings instead of yours.
+config.js

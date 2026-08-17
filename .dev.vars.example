@@ -1,0 +1,29 @@
+# Local development settings and secrets for `wrangler dev`.
+#
+#   cp .dev.vars.example .dev.vars   and fill in
+#
+# In production none of this exists as a file: the same names are added in the
+# Cloudflare dashboard under Settings → Variables and Secrets, as "Secret" for
+# credentials and "Text" for settings. This file is the local stand-in for
+# that screen, and it is git-ignored.
+#
+# Everything here is optional. With an empty .dev.vars the Worker serves the
+# bundled sample data.
+
+# --- credentials (type "Secret" in the dashboard) --------------------------
+AMBER_API_TOKEN=psk_00000000000000000000000000000000
+AMBER_SITE_ID=01ABCDEFGHIJKLMNOPQRSTUVWX
+
+# Public hostname of the Cloudflare Tunnel in front of Home Assistant.
+HA_BASE_URL=https://ha.example.com
+HA_TOKEN=eyJhbGciOi...
+
+# Only if that hostname is protected by a Cloudflare Access policy.
+HA_ACCESS_CLIENT_ID=
+HA_ACCESS_CLIENT_SECRET=
+
+# --- settings (type "Text" in the dashboard) -------------------------------
+# Defaults are in worker/env.js; set only what you want to change.
+# ALLOW_WRITES=true
+# TIME_ZONE=Australia/Melbourne
+# REFRESH_SECONDS=30

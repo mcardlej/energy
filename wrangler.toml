@@ -1,0 +1,33 @@
+#
+# Cloudflare Workers deployment for the Home Energy dashboard.
+#
+# This file is deliberately small. It describes how to *deploy* the Worker —
+# nothing about how it behaves. Every setting and every credential is set in
+# the Cloudflare dashboard instead, under
+#
+#   Workers & Pages → home-energy → Settings → Variables and Secrets
+#
+# where each entry is either a "Text" variable (a setting, readable in the
+# dashboard) or a "Secret" (a credential, write-only once saved). Every
+# setting has a default in worker/env.js, so a Worker with nothing configured
+# at all still deploys and runs — it just serves the bundled sample data.
+#
+# See README, "Putting it all in Cloudflare", for the full list.
+#
+name = "home-energy"
+main = "worker/index.js"
+compatibility_date = "2026-08-01"
+
+# Without this, `wrangler deploy` deletes every variable on the Worker and
+# replaces them with the (empty) set defined here — i.e. it would wipe your
+# dashboard settings on every deploy. Secrets are always preserved regardless.
+keep_vars = true
+
+# The static page is served from this same Worker, so page and API share an
+# origin: no CORS, and a session cookie just works.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# Route every request through the Worker, including static files, so the
+# security headers in worker/index.js apply to the page and not just the API.
+run_worker_first = true
