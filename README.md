@@ -5,9 +5,11 @@ A single-page dashboard for a house with solar, a home battery, an EV and an
 live power flow, the current buy/feed-in price, battery state of charge and
 operating mode, and the car's state of charge.
 
-The page ships with sample data so it runs out of the box. Pointing it at your
-real house is a matter of standing up a small backend that returns one JSON
-document — that is what most of this README is about.
+It deploys to Cloudflare as a single Worker that serves the page *and* talks to
+your upstreams, so **every setting and every credential lives in Cloudflare** —
+nothing sensitive is committed to this repository and nothing sensitive reaches
+the browser. It ships with sample data, so a fresh deploy works before you have
+configured a single token.
 
 ---
 
@@ -22,9 +24,13 @@ document — that is what most of this README is about.
   - [Sigenergy (solar, battery, grid)](#2-sigenergy-solar-battery-grid)
   - [Polestar (vehicle)](#3-polestar-vehicle)
   - [The shortcut: Home Assistant as the aggregator](#the-shortcut-home-assistant-as-the-aggregator)
-- [A reference backend](#a-reference-backend)
-- [Configuration](#configuration)
-- [Deploying](#deploying)
+- [Putting it all in Cloudflare](#putting-it-all-in-cloudflare)
+  - [What goes where](#what-goes-where)
+  - [Reaching Home Assistant from a Worker](#reaching-home-assistant-from-a-worker)
+  - [Deploy walkthrough](#deploy-walkthrough)
+  - [Rotating, listing and removing secrets](#rotating-listing-and-removing-secrets)
+- [Configuration reference](#configuration-reference)
+- [Locking it down](#locking-it-down)
 - [Security checklist](#security-checklist)
 - [Troubleshooting](#troubleshooting)
 
@@ -34,44 +40,76 @@ document — that is what most of this README is about.
 
 | File | Purpose |
 | --- | --- |
-| `index.html` | Markup only. No data, no inline logic. |
-| `styles.css` | All presentation, including loading/stale/error states. |
-| `app.js` | Fetches state, renders it, polls, handles failures, writes battery mode. |
-| `config.js` | Deployment settings. The only file you should need to edit. |
-| `mock/state.json` | Sample payload used in demo mode; also the schema reference. |
+| `public/index.html` | Markup only. No data, no inline logic. |
+| `public/styles.css` | All presentation, including loading/stale/error states. |
+| `public/app.js` | Fetches state, renders it, polls, handles failures, writes battery mode. |
+| `public/mock/state.json` | Sample payload used in demo mode; also the schema reference. |
+| `public/config.js` | **Local-development fallback only.** In production the Worker generates `/config.js` from the Cloudflare environment, and `.assetsignore` keeps this file from being uploaded. |
+| `public/.assetsignore` | Files excluded from Cloudflare's static asset store. |
+| `wrangler.toml` | Cloudflare deployment + every non-secret setting (`[vars]`). |
+| `.dev.vars.example` | Template for local secrets; copy to `.dev.vars` (git-ignored). |
+| `worker/index.js` | Worker entry point: routing, caching, security headers. |
+| `worker/env.js` | Reads settings and secrets off the Cloudflare `env` object. |
+| `worker/config.js` | Builds the public `/config.js` — settings only, never secrets. |
+| `worker/amber.js` | Amber Electric → the `price` block. |
+| `worker/homeassistant.js` | Home Assistant → the `site`, `battery`, `vehicle`, `today` blocks. |
 
-No build step, no framework, no dependencies. It is five static files that can be
-served from anything — nginx, Caddy, S3, a Raspberry Pi, GitHub Pages.
+The front end has no build step, no framework and no dependencies — it is four
+static files that could be served from anything. The Worker is what turns those
+files into a working dashboard: it holds the credentials, calls the upstreams,
+and hands the browser one JSON document. Both halves deploy together as a
+single `wrangler deploy`.
 
 ## Running it
 
+Two ways, depending on whether you want the Worker in the loop.
+
+**Static only — demo data, no Cloudflare:**
+
 ```bash
 # any static server; the page fetches JSON, so file:// will not work
-python3 -m http.server 8000
+cd public && python3 -m http.server 8000
 # → http://localhost:8000
 ```
 
-It starts in demo mode (`demo: true` in `config.js`) and reads
-`mock/state.json`, with the sample timestamps shifted onto the current clock so
+This uses the checked-in `public/config.js`, which sets `demo: true` and reads
+`mock/state.json` with the sample timestamps shifted onto the current clock so
 freshness labels read sensibly. A "Sample data" pill appears in the header and
 mode buttons do nothing but toast.
 
-To go live, set `demo: false` and point `apiBaseUrl` at your backend.
+**With the Worker — the real thing, locally:**
+
+```bash
+npm install
+cp .dev.vars.example .dev.vars     # fill in your tokens; git-ignored
+npx wrangler dev
+# → http://localhost:8787
+```
+
+`wrangler dev` serves the static files, generates `/config.js` from
+`wrangler.toml` + `.dev.vars`, and runs the real `/api/state` against your
+upstreams. With no secrets in `.dev.vars` it stays in demo mode, so it is safe
+to run before you have any tokens.
 
 ## Architecture
 
 ```
-  Browser (these files)
-        │  GET  /api/state          every 30 s
-        │  POST /api/battery/mode   on click
-        ▼
-  Your backend  ── caches, holds credentials, normalises ──┐
-        │                                                  │
-        ├─ Amber REST API            (cloud, token)         │
-        ├─ Sigenergy inverter        (local Modbus TCP)     │
-        └─ Polestar                  (cloud, unofficial)    │
-                                                            ▼
-                                              one normalised JSON document
+  Browser
+     │  GET  /                    public/ — index.html, app.js, styles.css
+     │  GET  /config.js           settings, generated from the Cloudflare environment
+     │  GET  /api/state           every 30 s
+     │  POST /api/battery/mode    on click
+     ▼
+  Cloudflare Worker  ── holds the secrets, caches, normalises ──┐
+     │   (assets pass through the Worker too, so the CSP and    │
+     │    other security headers apply on every route)          │
+     │                                                          │
+     ├─ Amber REST API        (cloud, AMBER_API_TOKEN)          │
+     └─ Home Assistant        (your house, via Cloudflare Tunnel)│
+            ├─ Sigenergy      (local Modbus TCP)                 │
+            └─ Polestar       (cloud, unofficial)                │
+                                                                 ▼
+                                            one normalised JSON document
 ```
 
 **The browser must not talk to Amber, Sigenergy or Polestar directly.** Three
@@ -83,11 +121,18 @@ independent reasons, any one of which is fatal:
    site, so the browser blocks the response even when the request succeeds.
 3. **Rate limits.** Amber allows roughly 50 requests per 5 minutes per token.
    One browser tab per family member polling directly will exhaust that; a
-   backend that caches for 60 s serves any number of tabs from one upstream call.
+   backend that caches for 90 s serves any number of tabs from one upstream call.
 
-So the backend is not optional ceremony — it is the thing that makes this
-workable. It can be tiny: ~150 lines of Node, or a Home Assistant template
-sensor plus a two-line proxy.
+The Worker is that backend. It is also where every setting lives: it generates
+`/config.js` per request from the Cloudflare environment, so changing the poll
+interval or the timezone is a `wrangler deploy` (or a dashboard edit), not a
+code change.
+
+**One thing a Worker cannot do:** open a Modbus TCP socket, or reach anything on
+your home LAN. Workers speak HTTP to the public internet only. That is why the
+inverter is reached through Home Assistant over a Cloudflare Tunnel rather than
+directly — see [Reaching Home Assistant from a
+Worker](#reaching-home-assistant-from-a-worker).
 
 ## The data contract
 
@@ -270,8 +315,8 @@ function cheapestWindow(intervals, slots = 4) {   // 4 × 30 min = 2 hours
 ```
 
 **Rate limits.** Roughly 50 requests per 5 minutes per token. Prices only change
-every 5 minutes anyway, so cache the response for 60–120 s in the backend and
-never let the browser drive an upstream call. On `429`, back off and keep
+every 5 minutes anyway, so the Worker caches the response for `AMBER_CACHE_MS`
+(90 s by default) and never lets the browser drive an upstream call. On `429`, back off and keep
 serving the cached value — the page will show the price ageing rather than
 disappearing.
 
@@ -286,7 +331,11 @@ There is **no public, documented Sigenergy cloud API** — mySigen/SigenCloud is
 closed app backend, and scraping it tends to break without notice. The reliable
 route is local:
 
-**Modbus TCP on your LAN.** Sigenergy publishes a Modbus register map ("Sigen
+**Modbus TCP on your LAN.** Note up front that a Cloudflare Worker cannot do
+this itself — Workers have no raw TCP to your house. Something on your LAN has
+to speak Modbus, and Home Assistant is the obvious candidate (see below). The
+protocol details still matter, because they are what the integration is doing on
+your behalf. Sigenergy publishes a Modbus register map ("Sigen
 Energy Modbus Protocol", available through installer/partner channels or your
 installer) and the gateway exposes Modbus TCP on port 502 once it is enabled in
 the installer settings. You need registers for: PV power, load power, grid
@@ -315,8 +364,9 @@ Notes from the register map that bite people:
   `POST /api/battery/mode`. Writing to the wrong register on an inverter is not
   a harmless mistake: gate the write behind an allowlist of exactly the four
   mode values, log every write, and test against the mySigen app before wiring
-  the button up. Until then, set `readOnly: true` in the payload (or
-  `readOnly: true` in `config.js`) and the buttons render disabled.
+  the button up. That allowlist is in `worker/homeassistant.js`, and the whole
+  path is off until you set `ALLOW_WRITES = "true"` in `wrangler.toml`. Until
+  then the Worker reports `readOnly: true` and the buttons render disabled.
 
 The community Home Assistant integration
 [`sigenergy-local-modbus`](https://github.com/TypQxQ/Sigenergy-Local-Modbus)
@@ -355,13 +405,15 @@ the least work, and it is what the three-integration path above converges on:
 | Sigenergy | `sigenergy-local-modbus` via HACS (Modbus TCP, local) |
 | Polestar | `polestar_api` via HACS |
 
-Home Assistant then owns the polling, retries, credential storage and history,
-and your backend collapses into one call that maps entity ids to the contract:
+Home Assistant then owns the polling, retries, local protocol work and history,
+and the Worker collapses into one call that maps entity ids to the contract —
+which is what `worker/homeassistant.js` already implements:
 
 ```js
-// GET /api/state, backed by Home Assistant
-const HA = process.env.HA_URL;                 // http://homeassistant.local:8123
-const TOKEN = process.env.HA_TOKEN;            // long-lived access token
+// GET /api/state, backed by Home Assistant. In the Worker these come off the
+// `env` object (Cloudflare Secrets), not from a file or a process environment.
+const HA = env.HA_BASE_URL;                    // https://ha.example.com (tunnel)
+const TOKEN = env.HA_TOKEN;                    // long-lived access token
 
 async function ha(entityId) {
   const r = await fetch(`${HA}/api/states/${entityId}`, {
@@ -392,200 +444,320 @@ await fetch(`${HA}/api/services/select/select_option`, {
 });
 ```
 
+That is exactly what `worker/homeassistant.js` does, so you do not have to write
+it — you only supply the entity ids if yours differ from the defaults.
+
 Two things to keep straight: entity ids differ between integration versions, so
-check them in Developer Tools → States rather than copying names; and the HA
-long-lived token stays on the server — never in `config.js`.
+check them in Developer Tools → States rather than copying names (override them
+with the `HA_ENTITIES` var); and the long-lived token stays server-side — it goes
+into Cloudflare Secrets as `HA_TOKEN`, never into `config.js`.
 
 ---
 
-## A reference backend
+## Putting it all in Cloudflare
 
-Minimal but production-shaped: one cached snapshot, upstream failures degrade
-into `errors[]` instead of a blank page, and no upstream call is ever driven
-directly by a page load.
+Everything — the page, the API, the settings and the secrets — lives in one
+Cloudflare Worker. There is no server to patch, no `.env` file on a box
+somewhere, and no credential in this repository.
 
-```js
-// server.js — node >= 18, `npm i express`
-import express from "express";
+### What goes where
 
-const app = express();
-app.use(express.json());
-app.use(express.static("public"));            // index.html, app.js, styles.css, config.js
+Three tiers, and the difference between them is the whole security model:
 
-const CACHE_MS = 15_000;
-let snapshot = null;
-let building = null;                          // single-flight guard
+| Tier | Stored in | Visible to | Use for |
+| --- | --- | --- | --- |
+| **Secrets** | Cloudflare Secrets (`wrangler secret put`) | the Worker only — write-only once set, never shown again, not in `git`, not in the dashboard | tokens, passwords, tunnel hostnames |
+| **Vars** | `[vars]` in `wrangler.toml` | anyone with the repo; most are echoed in `/config.js` | poll interval, timezone, entity ids, feature flags |
+| **Assets** | everything under `public/` | the public internet | the page itself |
 
-async function build() {
-  const errors = [];
-  const settle = async (source, fn) => {
-    try { return await fn(); }
-    catch (e) { errors.push({ source, message: e.message }); return null; }
-  };
+**Secrets** — set each one with `wrangler secret put NAME` (it prompts, so the
+value never lands in your shell history) or in the dashboard under *Workers &
+Pages → home-energy → Settings → Variables and Secrets*:
 
-  const [price, site, battery, vehicle, today] = await Promise.all([
-    settle("amber",    getAmberPrice),        // cache 60–120 s internally
-    settle("sigen",    getSitePower),         // Modbus, ~5 s
-    settle("sigen",    getBattery),
-    settle("polestar", getVehicle),           // cache 15–30 min internally
-    settle("sigen",    getTodayTotals),
-  ]);
+| Secret | Required | What it is |
+| --- | --- | --- |
+| `AMBER_API_TOKEN` | for prices | Personal token from [app.amber.com.au/developers](https://app.amber.com.au/developers). |
+| `AMBER_SITE_ID` | for prices | Your site id — `GET /v1/sites`, fetched once. Not strictly secret, but there is no reason to publish it. |
+| `HA_BASE_URL` | for telemetry | Public hostname of the Cloudflare Tunnel in front of Home Assistant, e.g. `https://ha.example.com`. Secret because it is an attack surface, not because it is unguessable. |
+| `HA_TOKEN` | for telemetry | Home Assistant long-lived access token (profile → Security → Long-lived access tokens). |
+| `HA_ACCESS_CLIENT_ID` | optional | Cloudflare Access service-token id, if that hostname is behind an Access policy. |
+| `HA_ACCESS_CLIENT_SECRET` | optional | The matching service-token secret. |
 
-  return { schemaVersion: 1, updatedAt: new Date().toISOString(),
-           price, site, battery, vehicle, today, errors };
-}
+**The Worker decides what it can do from which secrets exist.** No secrets at
+all → it serves the bundled sample and the header shows "Sample data". Amber
+secrets only → real prices, `—` for the power figures. Add the Home Assistant
+secrets → the whole dashboard goes live. You never edit `demo` by hand; it is
+derived.
 
-app.get("/api/state", async (_req, res) => {
-  try {
-    if (!snapshot || Date.now() - snapshot.at > CACHE_MS) {
-      building ??= build().finally(() => { building = null; });
-      snapshot = { at: Date.now(), data: await building };
-    }
-    res.set("Cache-Control", "no-store").json(snapshot.data);
-  } catch (e) {
-    // Serve stale rather than nothing — the page flags the age itself.
-    if (snapshot) return res.set("Cache-Control", "no-store").json(snapshot.data);
-    res.status(502).json({ error: "upstream unavailable" });
-  }
-});
+**Vars** are in `[vars]` in `wrangler.toml` — the full list is in
+[Configuration reference](#configuration-reference). They are deliberately *not*
+secret, because they are the things you want to see in a diff: an entity id
+changing is a code review, an API token changing is not.
 
-const MODES = new Set(["sigen_ai", "max_self_powered", "time_of_use", "fully_fed_to_grid"]);
+### Reaching Home Assistant from a Worker
 
-app.post("/api/battery/mode", async (req, res) => {
-  const { mode } = req.body ?? {};
-  if (!MODES.has(mode)) return res.status(400).json({ error: "unknown mode" });
-  if (process.env.ALLOW_WRITES !== "1") return res.status(403).json({ error: "read only" });
-  try {
-    const applied = await setInverterMode(mode);   // Modbus write / HA service call
-    snapshot = null;                               // force a fresh read next poll
-    console.log(JSON.stringify({ event: "mode_write", mode, applied, at: new Date() }));
-    res.json({ mode: applied });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
-});
+A Worker runs in Cloudflare's network. It cannot reach `192.168.1.50`, and it
+cannot speak Modbus. Home Assistant does both from inside your house; the Worker
+needs an HTTPS door into it. Use a Cloudflare Tunnel — it is outbound-only, so
+nothing is port-forwarded and your home IP is never exposed:
 
-app.listen(8080);
+```bash
+# on the machine running Home Assistant (or the HA "Cloudflared" add-on)
+cloudflared tunnel login
+cloudflared tunnel create home-assistant
+cloudflared tunnel route dns home-assistant ha.example.com
+
+# config.yml
+# tunnel: <tunnel-id>
+# credentials-file: /root/.cloudflared/<tunnel-id>.json
+# ingress:
+#   - hostname: ha.example.com
+#     service: http://localhost:8123
+#   - service: http_status:404
+
+cloudflared tunnel run home-assistant
 ```
 
-Worth keeping when you flesh this out:
+Home Assistant sits behind a proxy now, so tell it so — in `configuration.yaml`:
 
-- **Cache per upstream, not just per response.** Amber 60–120 s, Modbus 5 s,
-  Polestar 15–30 min. The 15 s response cache sits on top of those.
-- **Single-flight.** Ten tabs refreshing at once must produce one upstream call,
-  which is what the `building ??=` guard does.
-- **Never fail the whole payload for one dead source.** `settle()` is the whole
-  trick — the page is built to render around holes.
-- **`ALLOW_WRITES` off by default.** Turn it on only once you have verified the
-  mode register against the vendor app.
-- **Log every write** with the requested and applied mode.
+```yaml
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.16.0.0/12      # the cloudflared container/host, adjust to yours
+```
 
-## Configuration
+Then put that hostname behind Cloudflare Access so it is not open to the
+internet, and give the Worker a service token to get through:
 
-All of it lives in `config.js`, which is plain JavaScript so it can be swapped at
-deploy time (ConfigMap, bind mount, `envsubst`) without a rebuild.
+1. *Zero Trust → Access → Applications → Add* a self-hosted app for
+   `ha.example.com`.
+2. *Zero Trust → Access → Service Auth* → create a service token.
+3. Add a policy on the app: *Service Auth* → include that token. Add a second
+   policy for your own email if you want to open Home Assistant in a browser.
+4. `wrangler secret put HA_ACCESS_CLIENT_ID` and
+   `wrangler secret put HA_ACCESS_CLIENT_SECRET`.
 
-| Key | Default | Meaning |
+The Worker sends those as `CF-Access-Client-Id` / `CF-Access-Client-Secret` on
+every call. Skip steps 1–4 if you would rather rely on the HA token alone — the
+Worker works either way — but Access means an unauthenticated request never
+reaches Home Assistant at all.
+
+### Deploy walkthrough
+
+From a clean checkout:
+
+```bash
+npm install
+npx wrangler login                      # opens a browser, once per machine
+
+# 1. Deploy as-is. No secrets yet → sample data, and you can confirm the page
+#    and routing work before wiring anything real up.
+npx wrangler deploy
+# → https://home-energy.<your-subdomain>.workers.dev
+
+# 2. Prices. Both prompt for the value; nothing is echoed or logged.
+npx wrangler secret put AMBER_API_TOKEN
+npx wrangler secret put AMBER_SITE_ID
+
+# 3. Telemetry, once the tunnel from the previous section is up.
+npx wrangler secret put HA_BASE_URL
+npx wrangler secret put HA_TOKEN
+npx wrangler secret put HA_ACCESS_CLIENT_ID       # optional
+npx wrangler secret put HA_ACCESS_CLIENT_SECRET   # optional
+```
+
+Secrets take effect on the next request — no redeploy needed. Check:
+
+```bash
+curl -s https://home-energy.<subdomain>.workers.dev/config.js
+curl -s https://home-energy.<subdomain>.workers.dev/api/state | jq '{updatedAt, errors, price, site}'
+npx wrangler tail                       # live logs, including upstream failures
+```
+
+`errors[]` in the response names any upstream that failed and why; the page
+renders around the hole rather than blanking.
+
+**Enable writes last.** Verify the mode entity from Home Assistant's Developer
+Tools first, then set `ALLOW_WRITES = "true"` in `wrangler.toml` and
+`npx wrangler deploy`. Until then `POST /api/battery/mode` returns 403 and the
+Worker reports `readOnly: true`, so the buttons render disabled rather than
+failing on click.
+
+**A custom domain** is optional. Add a route in `wrangler.toml` for a zone you
+have on Cloudflare:
+
+```toml
+routes = [
+  { pattern = "energy.example.com", custom_domain = true }
+]
+```
+
+### Rotating, listing and removing secrets
+
+```bash
+npx wrangler secret list                # names and types only — never values
+npx wrangler secret put AMBER_API_TOKEN # overwrite in place; takes effect immediately
+npx wrangler secret delete HA_TOKEN     # telemetry falls back to sample data
+```
+
+Cloudflare cannot show you a secret's value after it is set — that is the point.
+If you lose one, generate a new token upstream and `put` it again. If one leaks,
+revoke it at the source (Amber's developer page, Home Assistant's token list)
+*and* replace it here; deleting it from Cloudflare alone does not invalidate it.
+
+---
+
+## Configuration reference
+
+Every value below is read from the Cloudflare environment by `worker/env.js`.
+Set the vars in `[vars]` in `wrangler.toml` (or in the dashboard) and deploy;
+set the secrets with `wrangler secret put`.
+
+### Sent to the browser in `/config.js`
+
+Public by definition — these are downloaded by every visitor.
+
+| Var | Default | Meaning |
 | --- | --- | --- |
-| `apiBaseUrl` | `""` | Backend origin. Empty = same origin as the page. |
-| `statePath` | `/api/state` | Snapshot endpoint. |
-| `modePath` | `/api/battery/mode` | Mode write endpoint. |
-| `demo` | `true` | Serve `mock/state.json` and disable writes. **Set to `false` in production.** |
-| `refreshSeconds` | `30` | Poll interval; polling pauses while the tab is hidden. |
-| `requestTimeoutMs` | `10000` | Per-request abort timeout. |
-| `staleAfterSeconds` | `{site:300, battery:300, price:900, vehicle:5400}` | Per-source stale thresholds. A number applies one value to all. |
-| `readOnly` | `false` | Force-disable the mode buttons regardless of payload. |
-| `locale` / `timeZone` | `en-AU` / `Australia/Melbourne` | Formatting. `null` = use the browser's. |
-| `priceUnit` | `c/kWh` | Label next to prices. |
+| `API_BASE_URL` | `""` | Backend origin. Empty = same origin, which is what you want when the Worker serves both. |
+| `STATE_PATH` | `/api/state` | Snapshot endpoint. Changing it moves the Worker route too. |
+| `MODE_PATH` | `/api/battery/mode` | Mode write endpoint. |
+| `REFRESH_SECONDS` | `30` | Poll interval; polling pauses while the tab is hidden. |
+| `REQUEST_TIMEOUT_MS` | `10000` | Browser-side per-request abort timeout. |
+| `STALE_AFTER_SECONDS` | `{"site":300,"battery":300,"price":900,"vehicle":5400}` | Per-source stale thresholds, as a JSON string. A plain number applies one value to all. |
+| `READ_ONLY` | `false` | Force-disable the mode buttons. Writes are *also* disabled whenever `ALLOW_WRITES` is off, so this is belt-and-braces. |
+| `LOCALE` | `en-AU` | Number and date formatting. |
+| `TIME_ZONE` | `Australia/Melbourne` | Timezone for all times shown. |
+| `PRICE_UNIT` | `c/kWh` | Label next to prices. |
+| `VEHICLE_NAME` | `Polestar 2` | Name on the vehicle card. |
+
+`demo` is not a var you set: the Worker derives it from whether upstream secrets
+exist, and `DEMO = "false"` only lets you turn the sample data *off* when
+nothing is configured.
+
+### Worker behaviour
+
+Not sent to the browser.
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `DEMO` | `true` | Serve `mock/state.json` when no upstream secret is set. |
+| `ALLOW_WRITES` | `false` | Master switch for `POST /api/battery/mode`. Requires the Home Assistant secrets too. |
+| `UPSTREAM_TIMEOUT_MS` | `8000` | Worker-side timeout per upstream call. |
+| `SNAPSHOT_CACHE_MS` | `15000` | How long an assembled snapshot is reused. |
+| `AMBER_CACHE_MS` | `90000` | Amber cache. Prices move every 5 minutes and the limit is ~50 requests / 5 min, so do not lower this much. |
+| `HA_CACHE_MS` | `10000` | Home Assistant cache. |
+| `AMBER_FORECAST_INTERVALS` | `16` | Forecast intervals requested (`next=`), 30 min each. |
+| `AMBER_FORECAST_SLOTS` | `4` | Width of the cheapest-window scan; 4 = 2 hours. |
+| `AMBER_FEED_IN_SIGN` | `-1` | `-1` negates Amber's feed-in `perKwh` so exporting reads as earnings. Flip to `1` if yours reports it the other way. |
+| `HA_GRID_SIGN` | `1` | `-1` if your grid entity reports export as positive. |
+| `HA_BATTERY_SIGN` | `1` | `-1` if your battery entity reports charging as negative. |
+| `HA_ENTITIES` | *(defaults in `worker/homeassistant.js`)* | JSON object overriding individual entity ids, e.g. `'{"solar":"sensor.my_pv_power"}'`. Merged over the defaults, so list only what differs. |
+| `HA_MODE_OPTIONS` | *(defaults in `worker/homeassistant.js`)* | JSON object mapping contract mode ids to the option strings your `select` entity accepts. |
 
 Behaviour worth knowing:
 
 - Polling stops when the tab is hidden and fires immediately on return, so a
   phone left on the counter overnight makes zero requests and is current the
   moment you pick it up.
-- Failures back off exponentially from `refreshSeconds` to a 5-minute ceiling,
+- Failures back off exponentially from `REFRESH_SECONDS` to a 5-minute ceiling,
   and reset on success, on `online`, or on the banner's Retry button.
 - The last good render stays on screen during an outage, dimmed, with a banner —
   a dashboard that blanks out is worse than one showing data it admits is old.
+- One dead upstream never blanks the page. Each source is settled
+  independently and failures become `errors[]` entries.
+- Ten tabs refreshing at once produce one upstream call: the snapshot cache
+  sits on top of a per-upstream cache.
 
-## Deploying
+---
 
-Static files plus a reverse proxy so the page and the API share an origin (no
-CORS, and a `SameSite` cookie just works):
+## Locking it down
 
-```nginx
-server {
-  listen 443 ssl http2;
-  server_name energy.example.com;
+A `workers.dev` URL is public. Anyone who finds it can read your house's power
+data, so put an identity check in front of the whole thing — Cloudflare Access
+does this without a line of code and without the page ever handling a token:
 
-  root /srv/energy;                    # index.html, app.js, styles.css, config.js, mock/
+1. *Zero Trust → Access → Applications → Add an application → Self-hosted.*
+2. Application domain: your Worker's hostname (a custom domain makes this
+   tidier than `*.workers.dev`).
+3. Policy: *Allow* → *Emails* → your household's addresses. One-time PIN needs
+   no identity provider at all.
 
-  # config.js must never be cached — it is how you change environments.
-  location = /config.js { add_header Cache-Control "no-store"; }
+Access sets a signed cookie, `app.js` already sends cookies with
+`credentials: "same-origin"`, and an expired session surfaces as "your session
+may have expired" rather than a blank page. There is deliberately no token auth
+in the front end — a token there would be a published credential.
 
-  location /api/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_read_timeout 15s;
-  }
-
-  add_header Content-Security-Policy
-    "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" always;
-  add_header X-Content-Type-Options nosniff always;
-  add_header Referrer-Policy no-referrer always;
-}
-```
-
-There is no inline script or style in the page, so that CSP holds with no
-`unsafe-inline`. If you would rather not depend on Google Fonts at all —
-worthwhile for a dashboard on a home network that may not have internet during
-an outage — download the three families into `fonts/`, replace the `<link>` in
-`index.html` with local `@font-face` rules, and tighten CSP to `'self'`. The
+The Worker sets a strict Content-Security-Policy (`default-src 'self'`, no
+`unsafe-inline`), `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: no-referrer` on every response. The only external origins are
+Google Fonts; if you would rather not depend on them — worthwhile for a
+dashboard that should work during an internet outage — download the three
+families into `public/fonts/`, replace the `<link>` in `public/index.html` with local
+`@font-face` rules, and tighten the CSP in `worker/index.js` to `'self'`. The
 CSS already falls back to system fonts, so a blocked font request degrades
 rather than breaks.
 
 For a wall tablet, also consider: `display: standalone` via a web manifest,
-kiosk mode in the browser, and the fact that `refreshSeconds: 30` on a 24/7
-screen is ~2,900 requests a day against your backend cache, not upstream.
+kiosk mode in the browser, and the fact that `REFRESH_SECONDS = "30"` on a 24/7
+screen is ~2,900 requests a day against the Worker's cache, not upstream. That
+is comfortably inside the Workers free tier.
 
 ## Security checklist
 
-- [ ] No upstream credential in `config.js`, `app.js`, or any file under the web root.
-- [ ] Backend reachable only over HTTPS, and only from where you need it — a
-      home dashboard rarely needs to be on the public internet at all. Prefer
-      Tailscale/WireGuard over port forwarding.
-- [ ] Authentication in front of `/api/*` if it is exposed: a session cookie
-      (`HttpOnly`, `Secure`, `SameSite=Lax`) set by your reverse proxy or an
-      identity proxy. `app.js` sends cookies with `credentials: "same-origin"`
-      and surfaces a 401 as "your session may have expired" — it deliberately
-      does not implement token auth, because the token would have to live in
-      front-end code.
-- [ ] `POST /api/battery/mode` validated against a fixed allowlist, off by
-      default, logged, and rate limited.
-- [ ] Modbus reachable only on the LAN/VLAN the backend sits on. It is
+- [ ] Every credential set with `wrangler secret put` — nothing in
+      `wrangler.toml`, `config.js`, `app.js`, or any file under the web root.
+      `git grep -iE 'psk_|Bearer |token *[:=]'` should come back clean.
+- [ ] `.dev.vars` git-ignored and never committed. `.dev.vars.example` holds
+      placeholders only.
+- [ ] `config.js` listed in `public/.assetsignore`, so the committed fallback
+      cannot shadow the Worker-generated one in production.
+- [ ] Cloudflare Access (or equivalent) in front of the Worker — a home
+      dashboard rarely needs to be open to the internet.
+- [ ] Home Assistant reached over a Cloudflare Tunnel, not a forwarded port,
+      and ideally behind an Access policy with a service token.
+- [ ] `POST /api/battery/mode` validated against the fixed allowlist in
+      `worker/homeassistant.js`, off by default (`ALLOW_WRITES`), and logged —
+      `wrangler tail` shows every write with requested and applied mode.
+- [ ] Modbus reachable only on the LAN/VLAN Home Assistant sits on. It is
       unauthenticated by design — anything that can reach port 502 can control
       the inverter.
-- [ ] Amber token stored as an environment variable or in a secret store,
-      rotatable from the Amber developer page if it leaks.
+- [ ] Amber token rotatable from the Amber developer page if it leaks; the HA
+      long-lived token revocable from its profile page. Revoke at the source,
+      not just in Cloudflare.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
-| Everything reads `—`, red "Cannot load data" banner | Backend down or wrong `apiBaseUrl`; the banner names the status code, and the console has the raw error. |
+| Everything reads `—`, red "Cannot load data" banner | Worker erroring or wrong `API_BASE_URL`; the banner names the status code, `npx wrangler tail` has the raw error. |
+| "Sample data" pill still showing after deploy | No upstream secret is set. `npx wrangler secret list` — the Worker only leaves demo mode once `AMBER_*` or `HA_*` are present. |
+| Prices live, all power values `—` | The Home Assistant secrets are missing or the tunnel is down. Check `errors[]` in `/api/state`. |
+| `/config.js` shows your committed defaults, not your vars | `public/config.js` got uploaded as an asset and is shadowing the Worker route. Confirm it is listed in `public/.assetsignore` and redeploy. |
+| `/api/state` returns `HTTP 403` from Home Assistant | Access policy is rejecting the Worker. Check the service token secrets, and that the Service Auth policy is attached to that application. |
+| HA returns `400 Bad Request` about a proxy | `use_x_forwarded_for` / `trusted_proxies` not set in `configuration.yaml` for the cloudflared host. |
 | Values render but "Data is stale" | The backend is answering from a cache while an upstream is dead. Check `errors[]` in the raw payload. |
 | Grid arrows point the wrong way | Sign convention flipped in your adapter: `grid` positive = importing, `battery` positive = charging. |
 | Feed-in price shown as a cost (or vice versa) | Amber's `feedIn` channel sign — see the Amber section. |
-| Mode buttons disabled | `demo: true`, `readOnly: true` in config or payload, an empty `modes` array, or the backend returning 403. |
+| Mode buttons disabled | Demo mode, `ALLOW_WRITES` still `false`, `READ_ONLY = "true"`, or an unmapped mode entity. |
 | Prices stop updating, backend log shows 429 | Amber rate limit. Increase the upstream cache; the page's poll interval is not the problem. |
 | Everything works, fonts look wrong | Google Fonts unreachable. Harmless — system fallbacks. Self-host to fix permanently. |
 
 Useful checks:
 
 ```bash
-curl -s localhost:8080/api/state | jq '{updatedAt, errors, price, site}'
-curl -s -X POST localhost:8080/api/battery/mode \
+npx wrangler tail                       # live Worker logs
+npx wrangler secret list                # which credentials are actually set
+
+BASE=https://home-energy.<subdomain>.workers.dev
+curl -s $BASE/config.js                 # exactly what the browser is configured with
+curl -s $BASE/api/state | jq '{updatedAt, errors, price, site}'
+curl -s -X POST $BASE/api/battery/mode \
   -H 'content-type: application/json' -d '{"mode":"time_of_use"}'
 ```
+
+Against a local `npx wrangler dev`, use `http://localhost:8787` as `BASE`.
 
 To exercise the UI's failure paths without breaking anything real, edit
 `mock/state.json`: negative `price.buy`, `descriptor: "spike"`, a negative

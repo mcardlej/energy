@@ -1,0 +1,62 @@
+#
+# Cloudflare Workers deployment for the Home Energy dashboard.
+#
+# This file holds the NON-SECRET settings. Everything in `[vars]` below is
+# readable by anyone who can see this repository, and most of it is echoed to
+# the browser in /config.js — so it must never contain a token or a password.
+#
+# Credentials live in Cloudflare Secrets instead:
+#
+#   wrangler secret put AMBER_API_TOKEN
+#   wrangler secret put AMBER_SITE_ID
+#   wrangler secret put HA_BASE_URL
+#   wrangler secret put HA_TOKEN
+#   wrangler secret put HA_ACCESS_CLIENT_ID       # optional, Cloudflare Access
+#   wrangler secret put HA_ACCESS_CLIENT_SECRET   # optional, Cloudflare Access
+#
+# See README, "Putting it all in Cloudflare".
+#
+name = "home-energy"
+main = "worker/index.js"
+compatibility_date = "2026-08-01"
+
+# The static page is served from this same Worker, so page and API share an
+# origin: no CORS, and a session cookie just works.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# Route every request through the Worker, including static files, so the
+# security headers in worker/index.js apply to the page and not just the API.
+run_worker_first = true
+
+[vars]
+# --- front-end settings (public: served in /config.js) ----------------------
+API_BASE_URL = ""                 # empty = same origin as the page
+STATE_PATH = "/api/state"
+MODE_PATH = "/api/battery/mode"
+REFRESH_SECONDS = "30"            # poll interval; pauses while the tab is hidden
+REQUEST_TIMEOUT_MS = "10000"
+STALE_AFTER_SECONDS = '{"site":300,"battery":300,"price":900,"vehicle":5400}'
+READ_ONLY = "false"               # true force-disables the mode buttons
+LOCALE = "en-AU"
+TIME_ZONE = "Australia/Melbourne"
+PRICE_UNIT = "c/kWh"
+VEHICLE_NAME = "Polestar 2"
+
+# --- backend behaviour (public, but not sent to the browser) ---------------
+DEMO = "true"                     # ignored once upstream secrets are set
+ALLOW_WRITES = "false"            # set "true" only after verifying the mode write
+UPSTREAM_TIMEOUT_MS = "8000"
+SNAPSHOT_CACHE_MS = "15000"       # response cache
+AMBER_CACHE_MS = "90000"          # Amber: ~50 requests / 5 min per token
+HA_CACHE_MS = "10000"
+AMBER_FORECAST_INTERVALS = "16"   # 16 × 30 min of forecast
+AMBER_FORECAST_SLOTS = "4"        # cheapest 2-hour window
+AMBER_FEED_IN_SIGN = "-1"         # -1 = negate Amber's feed-in perKwh
+HA_GRID_SIGN = "1"                # -1 if your grid entity reports export as +
+HA_BATTERY_SIGN = "1"             # -1 if your battery entity reports charge as −
+
+# Entity ids and mode options differ between integration versions. Override
+# only the ones that differ; see worker/homeassistant.js for the defaults.
+# HA_ENTITIES = '{"solar":"sensor.my_pv_power"}'
+# HA_MODE_OPTIONS = '{"time_of_use":"Time of Use"}'

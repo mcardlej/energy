@@ -1,0 +1,15 @@
+{
+  "name": "home-energy",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Home solar/battery/EV dashboard on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,18 @@
+# Local development secrets for `wrangler dev`.
+#
+#   cp .dev.vars.example .dev.vars   and fill in
+#
+# .dev.vars is git-ignored and is NEVER uploaded. In production these same
+# names are set with `wrangler secret put <NAME>` and stored encrypted by
+# Cloudflare — there is no deployed copy of this file.
+
+AMBER_API_TOKEN=psk_00000000000000000000000000000000
+AMBER_SITE_ID=01ABCDEFGHIJKLMNOPQRSTUVWX
+
+# Public hostname of the Cloudflare Tunnel in front of Home Assistant.
+HA_BASE_URL=https://ha.example.com
+HA_TOKEN=eyJhbGciOi...
+
+# Only if that hostname is protected by a Cloudflare Access policy.
+HA_ACCESS_CLIENT_ID=
+HA_ACCESS_CLIENT_SECRET=
